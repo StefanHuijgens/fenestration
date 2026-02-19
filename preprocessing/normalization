@@ -1,0 +1,136 @@
+import os
+import numpy as np
+import tifffile as tiff
+import tkinter as tk
+from tkinter import filedialog
+import argparse
+import sys
+
+
+def select_input_folder():
+    root = tk.Tk()
+    root.withdraw()
+    folder = filedialog.askdirectory(initialdir=os.getcwd(), title="Select input folder containing TIFF images")
+    root.destroy()
+    if not folder:
+        raise RuntimeError("No input folder selected.")
+    return folder
+
+
+# Black bar coords to exclude from normalization
+BAR_X, BAR_Y, BAR_W, BAR_H = 0, 690, 1024, 78
+
+
+def normalize_array(arr, mask=None):
+    """Normalize array to 0..1 excluding masked pixels. Works for 2D or 3D (H,W[,C])."""
+    a = arr.astype(np.float32)
+    if a.ndim == 3:
+        H, W, C = a.shape
+        out = np.zeros_like(a, dtype=np.float32)
+        for c in range(C):
+            channel = a[:, :, c]
+            vals = channel[mask]
+            if vals.size == 0:
+                out[:, :, c] = channel
+                continue
+            lo = np.percentile(vals, 1)
+            hi = np.percentile(vals, 99)
+            if hi == lo:
+                out[:, :, c] = np.clip(channel - lo, 0, None)
+            else:
+                out[:, :, c] = (channel - lo) / (hi - lo)
+        out = np.clip(out, 0.0, 1.0)
+    else:
+        vals = a[mask]
+        if vals.size == 0:
+            out = a
+        else:
+            lo = np.percentile(vals, 1)
+            hi = np.percentile(vals, 99)
+            if hi == lo:
+                out = np.clip(a - lo, 0, None)
+            else:
+                out = (a - lo) / (hi - lo)
+        out = np.clip(out, 0.0, 1.0)
+    return out
+
+
+def process_image(path_in, path_out):
+    img = tiff.imread(path_in)
+    if img.ndim not in (2, 3):
+        raise ValueError(f"Unsupported image shape: {img.shape}")
+
+    H, W = img.shape[:2]
+    # build mask of pixels to use for computing normalization (True=use)
+    mask = np.ones((H, W), dtype=bool)
+    x, y, w, h = BAR_X, BAR_Y, BAR_W, BAR_H
+    # clamp bar to image bounds
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(W, x + w)
+    y1 = min(H, y + h)
+    if x0 < x1 and y0 < y1:
+        mask[y0:y1, x0:x1] = False
+
+    normalized = normalize_array(img, mask=mask)
+
+    # convert back to original dtype
+    dtype = img.dtype
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        scaled = (normalized * info.max).round().astype(dtype)
+    else:
+        # for floats, keep in 0..1 range
+        scaled = normalized.astype(dtype)
+
+    # restore original bar pixels (leave them unchanged)
+    if x0 < x1 and y0 < y1:
+        if scaled.ndim == 3:
+            scaled[y0:y1, x0:x1, :] = img[y0:y1, x0:x1, :]
+        else:
+            scaled[y0:y1, x0:x1] = img[y0:y1, x0:x1]
+
+    tiff.imwrite(path_out, scaled)
+
+
+def main(input_folder=None):
+    if input_folder is None:
+        input_folder = select_input_folder()
+    else:
+        if not os.path.isdir(input_folder):
+            raise RuntimeError(f"Provided input folder does not exist: {input_folder}")
+    
+    # Create output folder with _Normalized suffix
+    parent_dir = os.path.dirname(input_folder)
+    input_name = os.path.basename(input_folder)
+    output_folder = os.path.join(parent_dir, f"{input_name}_Normalized")
+    os.makedirs(output_folder, exist_ok=True)
+    
+    print(f"Input folder: {input_folder}")
+    print(f"Output folder: {output_folder}")
+
+    for root, dirs, files in os.walk(input_folder):
+        for fname in files:
+            if not fname.lower().endswith((".tif", ".tiff")):
+                continue
+            in_path = os.path.join(root, fname)
+            rel = os.path.relpath(root, input_folder)
+            out_sub = os.path.join(output_folder, rel)
+            os.makedirs(out_sub, exist_ok=True)
+            out_path = os.path.join(out_sub, fname)
+            print(f"Processing {in_path} -> {out_path}")
+            try:
+                process_image(in_path, out_path)
+            except Exception as e:
+                print(f"Failed {in_path}: {e}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Normalize TIFFs excluding legend bar')
+    parser.add_argument('--input', '-i', help='Path to input folder containing TIFF images. If omitted, a dialog will appear.')
+    args = parser.parse_args()
+    try:
+        main(input_folder=args.input)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)

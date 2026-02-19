@@ -1,0 +1,64 @@
+import os
+import tifffile as tiff
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import filedialog
+
+# -------- USER SETTINGS --------
+def select_project_folder():
+    root = tk.Tk()
+    root.withdraw()
+    folder = filedialog.askdirectory(initialdir=os.getcwd(), title="Select project folder")
+    root.destroy()
+    if not folder:
+        raise RuntimeError("No project folder selected.")
+    return folder
+
+# -------- USER SETTINGS --------
+project_folder = select_project_folder()
+input_folder = os.path.join(project_folder, "Input")
+output_folder = os.path.join(project_folder, "Final_NoLegend")
+
+os.makedirs(output_folder, exist_ok=True)
+
+# -------- LEGEND REMOVAL FUNCTIONS --------
+
+def remove_legend(img, x, y, w, h):
+    if img.ndim == 2:
+        img[y:y+h, x:x+w] = 0
+    elif img.ndim == 3:
+        img[y:y+h, x:x+w, :] = 0
+    else:
+        raise ValueError(f"Unsupported image shape: {img.shape}")
+    return img
+
+
+# -------- MAIN --------
+if __name__ == "__main__":
+
+    # Use predefined legend coordinates (no clicking or loading required)
+    x, y, w, h = 0, 690, 1024, 78
+    print(f"Using predefined legend coordinates: x={x}, y={y}, w={w}, h={h}")
+
+    # -------- PROCESS ALL ANIMALS / ID / ME --------
+    for root, dirs, files in os.walk(input_folder):
+
+        for fname in files:
+            if fname.lower().endswith((".tif", ".tiff")):
+
+                input_path = os.path.join(root, fname)
+
+                # Preserve folder structure in output
+                relative_path = os.path.relpath(root, input_folder)
+                output_subfolder = os.path.join(output_folder, relative_path)
+                os.makedirs(output_subfolder, exist_ok=True)
+
+                output_path = os.path.join(output_subfolder, fname)
+
+                print(f"\nProcessing {input_path}...")
+
+                img = tiff.imread(input_path)
+                cleaned_img = remove_legend(img, x, y, w, h)
+
+                tiff.imwrite(output_path, cleaned_img)
+                print(f"Saved cleaned TIFF: {output_path}")

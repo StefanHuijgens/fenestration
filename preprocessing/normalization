@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from skimage.morphology import opening, disk
 import tifffile as tiff
 import tkinter as tk
 from tkinter import filedialog
@@ -55,7 +56,7 @@ def normalize_array(arr, mask=None):
     return out
 
 
-def process_image(path_in, path_out):
+def process_image(path_in, path_out, rolling_ball=False, radius=50):
     img = tiff.imread(path_in)
     if img.ndim not in (2, 3):
         raise ValueError(f"Unsupported image shape: {img.shape}")
@@ -72,7 +73,23 @@ def process_image(path_in, path_out):
     if x0 < x1 and y0 < y1:
         mask[y0:y1, x0:x1] = False
 
-    normalized = normalize_array(img, mask=mask)
+    # Optionally perform rolling-ball background subtraction (per-channel)
+    proc = img
+    if rolling_ball:
+        if img.ndim == 2:
+            channel = img
+            # ensure integer type for morphological ops
+            bg = opening(channel, disk(radius))
+            proc = np.clip(channel.astype(np.float32) - bg.astype(np.float32), 0, None)
+        else:
+            H, W, C = img.shape
+            proc = np.zeros_like(img, dtype=np.float32)
+            for c in range(C):
+                channel = img[:, :, c]
+                bg = opening(channel, disk(radius))
+                proc[:, :, c] = np.clip(channel.astype(np.float32) - bg.astype(np.float32), 0, None)
+
+    normalized = normalize_array(proc, mask=mask)
 
     # convert back to original dtype
     dtype = img.dtype
@@ -93,7 +110,7 @@ def process_image(path_in, path_out):
     tiff.imwrite(path_out, scaled)
 
 
-def main(input_folder=None):
+def main(input_folder=None, rolling_ball=False, radius=50):
     if input_folder is None:
         input_folder = select_input_folder()
     else:
@@ -120,7 +137,7 @@ def main(input_folder=None):
             out_path = os.path.join(out_sub, fname)
             print(f"Processing {in_path} -> {out_path}")
             try:
-                process_image(in_path, out_path)
+                process_image(in_path, out_path, rolling_ball=rolling_ball, radius=radius)
             except Exception as e:
                 print(f"Failed {in_path}: {e}")
 
@@ -128,9 +145,11 @@ def main(input_folder=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Normalize TIFFs excluding legend bar')
     parser.add_argument('--input', '-i', help='Path to input folder containing TIFF images. If omitted, a dialog will appear.')
+    parser.add_argument('--rolling-ball', action='store_true', dest='rolling_ball', help='Apply rolling-ball background subtraction before normalization')
+    parser.add_argument('--radius', type=int, default=50, help='Radius (pixels) for rolling-ball / disk structuring element')
     args = parser.parse_args()
     try:
-        main(input_folder=args.input)
+        main(input_folder=args.input, rolling_ball=args.rolling_ball, radius=args.radius)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)

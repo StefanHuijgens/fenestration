@@ -5,19 +5,37 @@ import tkinter as tk
 from tkinter import filedialog
 
 # -------- USER SETTINGS --------
-def select_project_folder():
+
+def select_input_folder():
     root = tk.Tk()
     root.withdraw()
-    folder = filedialog.askdirectory(initialdir=os.getcwd(), title="Select project folder")
+    folder = filedialog.askdirectory(initialdir=os.getcwd(), title="Select input folder containing TIFF images")
     root.destroy()
     if not folder:
-        raise RuntimeError("No project folder selected.")
+        raise RuntimeError("No input folder selected.")
     return folder
 
 # -------- USER SETTINGS --------
-project_folder = select_project_folder()
-input_folder = os.path.join(project_folder, "Input")
-output_folder = os.path.join(project_folder, "Final_NoLegend")
+
+
+input_folder = select_input_folder()
+parent_dir = os.path.dirname(input_folder)
+input_name = os.path.basename(input_folder)
+output_folder = os.path.join(parent_dir, "No_legend")
+
+
+print(f"Input folder: {input_folder}")
+print(f"Output folder: {output_folder}")
+
+# Print directory tree for debugging
+print("\nDirectory tree for Input folder:")
+for root, dirs, files in os.walk(input_folder):
+    level = root.replace(input_folder, '').count(os.sep)
+    indent = ' ' * 2 * level
+    print(f"{indent}{os.path.basename(root)}/")
+    subindent = ' ' * 2 * (level + 1)
+    for f in files:
+        print(f"{subindent}{f}")
 
 os.makedirs(output_folder, exist_ok=True)
 
@@ -44,21 +62,16 @@ if __name__ == "__main__":
     for root, dirs, files in os.walk(input_folder):
 
         for fname in files:
+            print(f"Found file: {fname}")
             if fname.lower().endswith((".tif", ".tiff")):
-
                 input_path = os.path.join(root, fname)
-
                 # Preserve folder structure in output
                 relative_path = os.path.relpath(root, input_folder)
                 output_subfolder = os.path.join(output_folder, relative_path)
                 os.makedirs(output_subfolder, exist_ok=True)
-
                 output_path = os.path.join(output_subfolder, fname)
-
                 print(f"\nProcessing {input_path}...")
-
                 img = tiff.imread(input_path)
                 cleaned_img = remove_legend(img, x, y, w, h)
-
                 tiff.imwrite(output_path, cleaned_img)
                 print(f"Saved cleaned TIFF: {output_path}")

@@ -1,0 +1,255 @@
+
+import os
+import numpy as np
+from cellpose import models, io, utils
+from roifile import ImagejRoi, roiwrite
+import traceback
+import tkinter as tk
+from tkinter import filedialog
+
+
+# --------------------
+# USER SETTINGS (with pop-up folder selection)
+# --------------------
+
+def select_folder(title, initialdir=None):
+    root = tk.Tk()
+    root.withdraw()
+    folder = filedialog.askdirectory(title=title, initialdir=initialdir or os.getcwd())
+    root.destroy()
+    if not folder:
+        raise RuntimeError(f"No folder selected for: {title}")
+    return folder
+
+
+
+# ...existing code...
+
+print("Select the ROOT IMAGE directory (contains animal ID folders)...")
+root_image_dir = select_folder("Select root image directory")
+
+print("Select the OUTPUT directory (where results will be saved)...")
+output_dir = select_folder("Select output directory")
+
+
+
+
+
+def select_file(title, initialdir=None):
+    root = tk.Tk()
+    root.withdraw()
+    file_path = filedialog.askopenfilename(title=title, initialdir=initialdir or os.getcwd())
+    root.destroy()
+    if not file_path:
+        raise RuntimeError(f"No file selected for: {title}")
+    return file_path
+
+print("Select the MODEL FILE (Cellpose model file, e.g. .pth or .pt)...")
+model_path = select_file("Select model file")
+
+channels = [0, 0]       # adjust for your data
+diameter = None
+use_gpu = True
+verbose = True
+
+# --------------------
+# SETUP OUTPUT FOLDERS
+# --------------------
+FLOW_DIR = os.path.join(output_dir, "flows")
+LABEL_DIR = os.path.join(output_dir, "labels")
+OUTLINE_DIR = os.path.join(output_dir, "outlines")
+ROI_DIR = os.path.join(output_dir, "rois")
+SEG_DIR = os.path.join(output_dir, "seg_npy")
+
+for d in [FLOW_DIR, LABEL_DIR, OUTLINE_DIR, ROI_DIR, SEG_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+# --------------------
+# LOAD CELLPOSE MODEL
+# --------------------
+try:
+    model = models.CellposeModel(
+        gpu=use_gpu,
+        pretrained_model=model_path
+    )
+except TypeError:
+    model = models.CellposeModel(
+        gpu=use_gpu,
+        model_type=None,
+        pretrained_model=model_path
+    )
+
+# --------------------
+# DISCOVER ANIMAL / ME FOLDERS
+# --------------------
+animal_dirs = [
+    d for d in os.listdir(root_image_dir)
+    if os.path.isdir(os.path.join(root_image_dir, d))
+]
+
+
+animal_image_paths = []
+for animal_id in animal_dirs:
+    me_path = os.path.join(root_image_dir, animal_id, "ME")
+    if os.path.isdir(me_path):
+        animal_image_paths.append((animal_id, me_path, True))  # True = uses ME
+    else:
+        # Check if there are images directly in the animal folder
+        animal_path = os.path.join(root_image_dir, animal_id)
+        image_files = [f for f in os.listdir(animal_path) if f.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff"))]
+        if image_files:
+            animal_image_paths.append((animal_id, animal_path, False))  # False = not ME
+        elif verbose:
+            print(f"Skipping {animal_id}: no ME folder and no images in animal folder")
+
+print(f"\nFound {len(animal_image_paths)} animal folders with images (ME or direct)")
+
+# --------------------
+# PROCESS IMAGES
+# --------------------
+success_list = []
+fail_list = []
+
+for animal_id, img_dir, uses_me in animal_image_paths:
+    image_files = [
+        f for f in os.listdir(img_dir)
+        if f.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff"))
+    ]
+    if not image_files:
+        if verbose:
+            print(f"Skipping {animal_id}: no images found")
+        continue
+
+    folder_label = "ME" if uses_me else "DIRECT"
+    if verbose:
+        print(f"\n=== Processing {animal_id}/{folder_label} ({len(image_files)} images) ===")
+
+    # Per-animal output dirs
+    subfolder = "ME" if uses_me else "DIRECT"
+    flow_out = os.path.join(FLOW_DIR, animal_id, subfolder)
+    label_out = os.path.join(LABEL_DIR, animal_id, subfolder)
+    outline_out = os.path.join(OUTLINE_DIR, animal_id, subfolder)
+    roi_out = os.path.join(ROI_DIR, animal_id, subfolder)
+    seg_out = os.path.join(SEG_DIR, animal_id, subfolder)
+
+    for d in [flow_out, label_out, outline_out, roi_out, seg_out]:
+        os.makedirs(d, exist_ok=True)
+
+    for fname in image_files:
+        base = os.path.splitext(fname)[0]
+        img_path = os.path.join(img_dir, fname)
+
+        if verbose:
+            print(f"Processing {animal_id} | {fname}")
+
+        try:
+            img = io.imread(img_path)
+
+            masks, flows, styles = model.eval(
+                img,
+                channels=channels,
+                diameter=diameter
+            )
+
+            # --------------------
+            # SEG (NPY)
+            # --------------------
+            np.save(
+                os.path.join(seg_out, base + "_seg.npy"),
+                {"masks": masks, "flows": flows, "styles": styles}
+            )
+
+            # --------------------
+            # FLOWS
+            # --------------------
+            if isinstance(flows, list):
+                for i, flow in enumerate(flows):
+                    io.imsave(
+                        os.path.join(flow_out, f"{base}_flow_{i}.tif"),
+                        flow.astype(np.float32)
+                    )
+            else:
+                io.imsave(
+                    os.path.join(flow_out, base + "_flows.tif"),
+                    flows.astype(np.float32)
+                )
+
+            # --------------------
+            # OUTLINES
+            # --------------------
+            outlines = utils.outlines_list(masks)
+
+            if img.ndim == 2:
+                img_rgb = np.stack([img] * 3, axis=-1)
+            else:
+                img_rgb = img.copy()
+
+            if img_rgb.dtype != np.uint8:
+                max_val = img_rgb.max()
+                if max_val > 0:
+                    img_rgb = (img_rgb / max_val * 255).astype(np.uint8)
+                else:
+                    img_rgb = img_rgb.astype(np.uint8)
+
+            for outline in outlines:
+                if outline is None or len(outline) == 0:
+                    continue
+                rc = np.fliplr(outline)
+                rows = np.clip(rc[:, 0], 0, img_rgb.shape[0] - 1)
+                cols = np.clip(rc[:, 1], 0, img_rgb.shape[1] - 1)
+                img_rgb[rows, cols] = [255, 0, 0]
+
+            io.imsave(
+                os.path.join(outline_out, base + "_outlines.png"),
+                img_rgb
+            )
+
+            # --------------------
+            # LABELS
+            # --------------------
+            dtype = np.uint16 if masks.max() < 65535 else np.uint32
+            io.imsave(
+                os.path.join(label_out, base + "_labels.tif"),
+                masks.astype(dtype)
+            )
+
+            # --------------------
+            # ROIS
+            # --------------------
+            rois = []
+            for i, outline in enumerate(outlines):
+                if outline is None or len(outline) == 0:
+                    continue
+                xy = np.fliplr(outline).astype(np.int16)
+                rois.append(
+                    ImagejRoi.frompoints(
+                        xy,
+                        name=f"{animal_id}_cell_{i+1}"
+                    )
+                )
+
+            if rois:
+                roiwrite(
+                    os.path.join(roi_out, base + "_rois.zip"),
+                    rois
+                )
+
+            success_list.append(f"{animal_id}/{fname}")
+
+        except Exception:
+            fail_list.append(f"{animal_id}/{fname}")
+            print(f"Failed {animal_id} | {fname}")
+            traceback.print_exc()
+
+# --------------------
+# SUMMARY
+# --------------------
+print("\n==============================")
+print(f"Processed {len(success_list)} images successfully.")
+if fail_list:
+    print(f"Failed {len(fail_list)} images:")
+    for f in fail_list:
+        print("  ", f)
+else:
+    print("No failures.")
+print("==============================\n")
